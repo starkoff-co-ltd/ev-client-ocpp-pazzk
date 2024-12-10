@@ -3,6 +3,7 @@
 
 #include "ocpp/ocpp.h"
 #include "ocpp/overrides.h"
+
 #include <errno.h>
 #include <time.h>
 #include <stdlib.h>
@@ -117,6 +118,7 @@ TEST(Core, step_ShouldDropMessage_WhenFailedSendingMoreThanRetries) {
 	step(0);
 	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
 	mock().expectOneCall("ocpp_send").andReturnValue(-1);
+	mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_FREE);
 	step(OCPP_DEFAULT_TX_TIMEOUT_SEC);
 	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
 	step(OCPP_DEFAULT_TX_TIMEOUT_SEC*2);
@@ -138,11 +140,12 @@ TEST(Core, step_ShouldSendHeartBeat_WhenNoMessageSentDuringHeartBeatInterval) {
 	mock().expectOneCall("ocpp_recv").withOutputParameterReturning("msg", &resp, sizeof(resp));
 	mock().expectOneCall("on_ocpp_event").withParameter("event_type", 2);
 	mock().expectOneCall("on_ocpp_event").withParameter("event_type", 0);
-	step(interval*2-1);
+	step(interval + 1);
 	check_rx(OCPP_MSG_ROLE_CALLRESULT, OCPP_MSG_HEARTBEAT);
+
 	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
 	mock().expectOneCall("ocpp_send").andReturnValue(0);
-	step(interval*2);
+	step(interval*2+1);
 }
 
 TEST(Core, step_ShouldNotSendHeartBeat_WhenAnyMessageSentDuringHeartBeatInterval) {
@@ -161,11 +164,15 @@ TEST(Core, step_ShouldNotSendHeartBeat_WhenAnyMessageSentDuringHeartBeatInterval
 		.type = sent.type,
 	};
 	memcpy(resp.id, sent.message_id, sizeof(sent.message_id));
+	mock().expectOneCall("ocpp_send").andReturnValue(0);
 	mock().expectOneCall("ocpp_recv").withOutputParameterReturning("msg", &resp, sizeof(resp));
 	mock().expectOneCall("on_ocpp_event").withParameter("event_type", 2);
 	mock().expectOneCall("on_ocpp_event").withParameter("event_type", 0);
-	step(interval*2-1);
+	step(interval*2);
 	check_rx(OCPP_MSG_ROLE_CALLRESULT, OCPP_MSG_DATA_TRANSFER);
+
+	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+	step(interval*3-1);
 }
 
 TEST(Core, ShouldSendStartTransaction_WhenQueueIsFull) {
@@ -215,9 +222,75 @@ TEST(Core, ShouldReturnNOMEM_WhenQueueIsFullWithTransactionRelatedMessages) {
 }
 
 TEST(Core, ShouldDropTransactionRelatedMessages_WhenServerReponsesWithErrorMoreThanMaxAttemptsConfigured) {
+	int32_t interval;
+	int32_t max_attempts;
+	ocpp_get_configuration("TransactionMessageRetryInterval",
+			&interval, sizeof(interval), 0);
+	ocpp_get_configuration("TransactionMessageAttempts",
+			&max_attempts, sizeof(max_attempts), NULL);
+	struct ocpp_StartTransaction start;
+	struct ocpp_message msg = {
+		.role = OCPP_MSG_ROLE_CALLERROR,
+		.type = OCPP_MSG_START_TRANSACTION,
+	};
+
+	ocpp_push_request(OCPP_MSG_START_TRANSACTION, &start, sizeof(start), true);
+	mock().expectOneCall("ocpp_send").andReturnValue(0);
+	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+	step(0);
+	memcpy(msg.id, sent.message_id, sizeof(msg.id));
+	for (int i = 0; i < max_attempts-1; i++) {
+		mock().expectOneCall("ocpp_recv").withOutputParameterReturning("msg", &msg, sizeof(msg));
+		mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_INCOMING);
+		if (i) {
+			mock().expectOneCall("ocpp_send").andReturnValue(0);
+		}
+		step((interval*i)*i+1);
+	}
+
+	mock().expectOneCall("ocpp_send").andReturnValue(0);
+	mock().expectOneCall("ocpp_recv").withOutputParameterReturning("msg", &msg, sizeof(msg));
+	mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_INCOMING);
+	mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_FREE);
+	step((interval*max_attempts)*max_attempts+1);
 }
 
 TEST(Core, ShouldSendTransactionRelatedmessagesIndefinitely_WhenTransportErrors) {
+}
+
+TEST(Core, ShouldDropNonTransactionRelatedMessagesAfterTimeout_WhenNoResponseReceived) {
+	ocpp_push_request(OCPP_MSG_DATA_TRANSFER, &(const struct ocpp_DataTransfer) {
+		.vendorId = "VendorID",
+	}, sizeof(struct ocpp_DataTransfer), false);
+
+	int i = 0;
+	for (; i < OCPP_DEFAULT_TX_RETRIES; i++) {
+		mock().expectOneCall("ocpp_send").andReturnValue(0);
+		mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+		step(i*OCPP_DEFAULT_TX_TIMEOUT_SEC);
+	}
+
+	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+	mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_FREE);
+	step(i*OCPP_DEFAULT_TX_TIMEOUT_SEC);
+}
+
+TEST(Core, ShouldDropNonTransactionRelatedMessagesAfterTimeout_WhenTransportErrors) {
+	ocpp_push_request(OCPP_MSG_DATA_TRANSFER, &(const struct ocpp_DataTransfer) {
+		.vendorId = "VendorID",
+	}, sizeof(struct ocpp_DataTransfer), false);
+
+	int i = 0;
+	for (; i < OCPP_DEFAULT_TX_RETRIES-1; i++) {
+		mock().expectOneCall("ocpp_send").andReturnValue(-1);
+		mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+		step(i*OCPP_DEFAULT_TX_TIMEOUT_SEC);
+	}
+
+	mock().expectOneCall("ocpp_send").andReturnValue(-1);
+	mock().expectOneCall("ocpp_recv").ignoreOtherParameters().andReturnValue(-ENOMSG);
+	mock().expectOneCall("on_ocpp_event").withParameter("event_type", OCPP_EVENT_MESSAGE_FREE);
+	step(i*OCPP_DEFAULT_TX_TIMEOUT_SEC);
 }
 
 TEST(Core, t) {

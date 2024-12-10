@@ -11,6 +11,13 @@
 #include <errno.h>
 #include <time.h>
 
+#if !defined(OCPP_DEBUG)
+#define OCPP_DEBUG(...)
+#endif
+#if !defined(OCPP_ERROR)
+#define OCPP_ERROR(...)
+#endif
+
 #if !defined(OCPP_TX_POOL_LEN)
 #define OCPP_TX_POOL_LEN			8
 #endif
@@ -93,6 +100,28 @@ static int count_messages_ticking(void)
 	return list_count(&m.tx.timer);
 }
 
+static void update_last_tx_timestamp(const time_t *now)
+{
+	m.tx.timestamp = *now;
+	OCPP_DEBUG("Last TX timestamp: %ld\n", m.tx.timestamp);
+}
+
+static void update_last_rx_timestamp(const time_t *now)
+{
+	m.rx.timestamp = *now;
+	OCPP_DEBUG("Last RX timestamp: %ld\n", m.rx.timestamp);
+}
+
+static void dispatch_event(ocpp_event_t event_type,
+		const struct ocpp_message *msg)
+{
+	if (m.event_callback) {
+		ocpp_unlock();
+		(*m.event_callback)(event_type, msg, m.event_callback_ctx);
+		ocpp_lock();
+	}
+}
+
 static struct message *alloc_message(void)
 {
 	for (int i = 0; i < OCPP_TX_POOL_LEN; i++) {
@@ -110,13 +139,7 @@ static struct message *alloc_message(void)
 
 static void free_message(struct message *msg)
 {
-	if (m.event_callback) {
-		ocpp_unlock();
-		(*m.event_callback)(OCPP_EVENT_MESSAGE_FREE,
-				&msg->body, m.event_callback_ctx);
-		ocpp_lock();
-	}
-
+	dispatch_event(OCPP_EVENT_MESSAGE_FREE, &msg->body);
 	memset(msg, 0, sizeof(*msg));
 }
 
@@ -171,32 +194,37 @@ static bool is_transaction_related(const struct message *msg)
 	}
 }
 
+static bool is_droppable(const struct message *msg)
+{
+	/* never drop BootNotification and transaction-related messages. */
+	return !is_transaction_related(msg) &&
+		msg->body.type != OCPP_MSG_BOOTNOTIFICATION;
+}
+
 static bool should_drop(struct message *msg)
 {
-	uint32_t max_attempts = OCPP_DEFAULT_TX_RETRIES; /* non-transactional */
+	const uint32_t max_attempts = OCPP_DEFAULT_TX_RETRIES;
 
-	/* never drop BootNotification and transaction-related messages. */
-	if (msg->body.type == OCPP_MSG_BOOTNOTIFICATION ||
-			is_transaction_related(msg)) {
+	if (!is_droppable(msg)) {
 		return false;
 	}
 
-	if (msg->attempts >= max_attempts) {
-		return true;
+	if (msg->attempts < max_attempts) {
+		return false;
 	}
 
-	return false;
+	return true;
 }
 
 static bool should_send_heartbeat(const time_t *now)
 {
 	uint32_t interval;
-
 	ocpp_get_configuration("HeartbeatInterval",
 			&interval, sizeof(interval), 0);
+	const bool disabled = interval == 0;
+	const uint32_t elapsed = (uint32_t)(*now - m.tx.timestamp);
 
-	if (interval == 0 || (uint32_t)(*now - m.tx.timestamp) < interval ||
-			list_count(&m.tx.ready) > 0 ||
+	if (disabled || elapsed < interval || list_count(&m.tx.ready) > 0 ||
 			list_count(&m.tx.wait) > 0) {
 		return false;
 	}
@@ -204,7 +232,16 @@ static bool should_send_heartbeat(const time_t *now)
 	return true;
 }
 
-static time_t calc_message_timeout(const struct message *msg, const time_t *now)
+/* Retry interval for the message that is not delivered to the server. */
+static time_t get_retry_interval(const struct message *msg, const time_t *now)
+{
+	uint32_t interval = OCPP_DEFAULT_TX_TIMEOUT_SEC;
+	return *now + interval;
+}
+
+/* Next period to send the message that is delivered to the server, but not
+ * processed properly by the server. */
+static time_t get_next_period(const struct message *msg, const time_t *now)
 {
 	uint32_t interval = OCPP_DEFAULT_TX_TIMEOUT_SEC;
 
@@ -221,29 +258,36 @@ static time_t calc_message_timeout(const struct message *msg, const time_t *now)
 	return *now + interval;
 }
 
+static void update_message_expiry(struct message *msg, const time_t *now)
+{
+	msg->expiry = get_next_period(msg, now);
+}
+
 static void send_message(struct message *msg, const time_t *now)
 {
 	msg->attempts++;
-	msg->expiry = calc_message_timeout(msg, now);
+	msg->expiry = get_retry_interval(msg, now);
 
 	del_msg_ready(msg);
+
+	OCPP_DEBUG("tx: %s.req (%d/%d)\n", ocpp_stringify_type(msg->body.type),
+			msg->attempts, OCPP_DEFAULT_TX_RETRIES);
 
 	if (ocpp_send(&msg->body) == 0) {
 		if (msg->body.role == OCPP_MSG_ROLE_CALL) {
 			put_msg_wait(msg);
-		} else if (msg->body.role == OCPP_MSG_ROLE_CALLRESULT ||
-				msg->body.role == OCPP_MSG_ROLE_CALLERROR) {
-			free_message(msg);
+			return;
 		}
-
-		m.tx.timestamp = *now;
 	} else {
 		if (msg->attempts < OCPP_DEFAULT_TX_RETRIES ||
 				is_transaction_related(msg) ||
 				msg->body.type == OCPP_MSG_BOOTNOTIFICATION) {
 			put_msg_wait(msg);
+			return;
 		}
 	}
+
+	free_message(msg);
 }
 
 static void process_tx_timeout(const time_t *now)
@@ -260,8 +304,12 @@ static void process_tx_timeout(const time_t *now)
 		del_msg_wait(msg);
 
 		if (should_drop(msg)) {
+			OCPP_DEBUG("Dropping message %s\n",
+					ocpp_stringify_type(msg->body.type));
 			free_message(msg);
 		} else {
+			OCPP_DEBUG("Retrying message %s\n",
+					ocpp_stringify_type(msg->body.type));
 			put_msg_ready_infront(msg);
 		}
 	}
@@ -271,8 +319,11 @@ static int process_queued_messages(const time_t *now)
 {
 	process_tx_timeout(now);
 
+	/* do not send a message if there is a message waiting for a response.
+	 * This is to prevent the server from being overwhelmed by the client,
+	 * sending multiple messages before the server responds to the previous
+	 * message. */
 	if (count_messages_waiting() > 0) {
-		/* wait for the response to the previous message */
 		return -EBUSY;
 	}
 
@@ -332,18 +383,25 @@ static void process_central_request(const struct ocpp_message *received)
 }
 
 static void process_central_response(const struct ocpp_message *received,
-		struct message *req)
+		struct message *req, const time_t *now)
 {
 	del_msg_wait(req);
+
+	OCPP_DEBUG("rx: %s.conf\n", ocpp_stringify_type(req->body.type));
 
 	if (received->role == OCPP_MSG_ROLE_CALLERROR &&
 			is_transaction_related(req)) {
 		uint32_t max_attempts = OCPP_DEFAULT_TX_RETRIES;
 		ocpp_get_configuration("TransactionMessageAttempts",
-				&max_attempts, sizeof(max_attempts),
-				NULL);
+				&max_attempts, sizeof(max_attempts), NULL);
 		if (req->attempts < max_attempts) {
-			put_msg_ready_infront(req);
+			update_message_expiry(req, now);
+			put_msg_wait(req);
+
+			OCPP_DEBUG("%s will be sent again at %ld (%d/%d)\n",
+					ocpp_stringify_type(req->body.type),
+					req->expiry,
+					req->attempts, max_attempts);
 			return;
 		}
 	}
@@ -351,7 +409,7 @@ static void process_central_response(const struct ocpp_message *received,
 	free_message(req);
 }
 
-static int process_incoming_messages(void)
+static int process_incoming_messages(const time_t *now)
 {
 	struct ocpp_message received = { 0, };
 	struct message *req = NULL;
@@ -370,21 +428,28 @@ static int process_incoming_messages(void)
 		break;
 	case OCPP_MSG_ROLE_CALLRESULT: /* fall through */
 	case OCPP_MSG_ROLE_CALLERROR:
-		if ((req = find_msg_by_idstr(&m.tx.wait, received.id)) == NULL) {
+		if (!(req = find_msg_by_idstr(&m.tx.wait, received.id))) {
 			err = -ENOLINK;
+			OCPP_DEBUG("No matching request for response %s\n",
+					ocpp_stringify_type(received.type));
 			break;
 		}
-		process_central_response(&received, req);
+		process_central_response(&received, req, now);
+		update_last_tx_timestamp(now); /* Note that tx timestamp is
+			updated when the response of the message is received. */
 		break;
 	default:
+		err = -EINVAL;
+		OCPP_ERROR("Invalid message role: %d\n", received.role);
 		break;
 	}
 
 out:
-	if (m.event_callback && err != -ENOMSG) {
-		ocpp_unlock();
-		(*m.event_callback)(err, &received, m.event_callback_ctx);
-		ocpp_lock();
+	if (err != -ENOMSG) {
+		if (err >= 0) {
+			update_last_rx_timestamp(now);
+		}
+		dispatch_event(err, &received);
 	}
 
 	return err;
@@ -418,6 +483,8 @@ static int remove_oldest(void)
 		if (msg->body.type != OCPP_MSG_BOOTNOTIFICATION &&
 				msg->body.type != OCPP_MSG_START_TRANSACTION &&
 				msg->body.type != OCPP_MSG_STOP_TRANSACTION) {
+			OCPP_DEBUG("Removing the oldest message: %s\n",
+					ocpp_stringify_type(msg->body.type));
 			del_msg_ready(msg);
 			free_message(msg);
 			return 0;
@@ -446,7 +513,8 @@ static const char **get_typestr_array(void)
 		[OCPP_MSG_STATUS_NOTIFICATION] = "StatusNotification",
 		[OCPP_MSG_STOP_TRANSACTION] = "StopTransaction",
 		[OCPP_MSG_UNLOCK_CONNECTOR] = "UnlockConnector",
-		[OCPP_MSG_DIAGNOSTICS_NOTIFICATION] = "DiagnosticsStatusNotification",
+		[OCPP_MSG_DIAGNOSTICS_NOTIFICATION] =
+			"DiagnosticsStatusNotification",
 		[OCPP_MSG_FIRMWARE_NOTIFICATION] = "FirmwareStatusNotification",
 		[OCPP_MSG_GET_DIAGNOSTICS] = "GetDiagnostics",
 		[OCPP_MSG_UPDATE_FIRMWARE] = "UpdateFirmware",
@@ -461,13 +529,16 @@ static const char **get_typestr_array(void)
 		[OCPP_MSG_CERTIFICATE_SIGNED] = "CertificateSigned",
 		[OCPP_MSG_DELETE_CERTIFICATE] = "DeleteCertificate",
 		[OCPP_MSG_EXTENDED_TRIGGER_MESSAGE] = "ExtendedTriggerMessage",
-		[OCPP_MSG_GET_INSTALLED_CERTIFICATE_IDS] = "GetInstalledCertificateIds",
+		[OCPP_MSG_GET_INSTALLED_CERTIFICATE_IDS] =
+			"GetInstalledCertificateIds",
 		[OCPP_MSG_GET_LOG] = "GetLog",
 		[OCPP_MSG_INSTALL_CERTIFICATE] = "InstallCertificate",
 		[OCPP_MSG_LOG_STATUS_NOTIFICATION] = "LogStatusNotification",
-		[OCPP_MSG_SECURITY_EVENT_NOTIFICATION] = "SecurityEventNotification",
+		[OCPP_MSG_SECURITY_EVENT_NOTIFICATION] =
+			"SecurityEventNotification",
 		[OCPP_MSG_SIGN_CERTIFICATE] = "SignCertificate",
-		[OCPP_MSG_SIGNED_FIRMWARE_STATUS_NOTIFICATION] = "SignedFirmwareStatusNotification",
+		[OCPP_MSG_SIGNED_FIRMWARE_STATUS_NOTIFICATION] =
+			"SignedFirmwareStatusNotification",
 		[OCPP_MSG_SIGNED_UPDATE_FIRMWARE] = "SignedUpdateFirmware",
 	};
 
@@ -495,8 +566,12 @@ ocpp_message_t ocpp_get_type_from_string(const char *typestr)
 
 ocpp_message_t ocpp_get_type_from_idstr(const char *idstr)
 {
+	const struct message *req = NULL;
+
 	ocpp_lock();
-	const struct message *req = find_msg_by_idstr(&m.tx.wait, idstr);
+	{
+		req = find_msg_by_idstr(&m.tx.wait, idstr);
+	}
 	ocpp_unlock();
 
 	if (req == NULL) {
@@ -509,16 +584,19 @@ ocpp_message_t ocpp_get_type_from_idstr(const char *idstr)
 int ocpp_push_request(ocpp_message_t type, const void *data, size_t datasize,
 		bool force)
 {
+	int rc = 0;
+
 	ocpp_lock();
-
-	int rc = push_message(NULL, type, data, datasize, 0, put_msg_ready, 0);
-
-	if (rc != 0 && force) {
-		remove_oldest();
+	{
 		rc = push_message(NULL, type, data, datasize, 0,
 				put_msg_ready, 0);
-	}
 
+		if (rc != 0 && force) {
+			remove_oldest();
+			rc = push_message(NULL, type, data, datasize, 0,
+					put_msg_ready, 0);
+		}
+	}
 	ocpp_unlock();
 
 	return rc;
@@ -528,14 +606,17 @@ int ocpp_push_request_defer(ocpp_message_t type,
 		const void *data, size_t datasize, uint32_t timer_sec)
 {
 	list_add_func_t f = put_msg_timer;
+	int rc = 0;
 
 	if (timer_sec == 0) {
 		f = put_msg_ready;
 	}
 
 	ocpp_lock();
-	int rc = push_message(NULL, type, data, datasize,
-			time(NULL) + (time_t)timer_sec, f, 0);
+	{
+		rc = push_message(NULL, type, data, datasize,
+				time(NULL) + (time_t)timer_sec, f, 0);
+	}
 	ocpp_unlock();
 
 	return rc;
@@ -544,9 +625,13 @@ int ocpp_push_request_defer(ocpp_message_t type,
 int ocpp_push_response(const struct ocpp_message *req,
 		const void *data, size_t datasize, bool err)
 {
+	int rc = 0;
+
 	ocpp_lock();
-	int rc = push_message(req->id, req->type, data, datasize,
-			0, put_msg_ready, err);
+	{
+		rc = push_message(req->id, req->type, data, datasize,
+				0, put_msg_ready, err);
+	}
 	ocpp_unlock();
 
 	return rc;
@@ -554,16 +639,15 @@ int ocpp_push_response(const struct ocpp_message *req,
 
 int ocpp_step(void)
 {
+	const time_t now = time(NULL);
+
 	ocpp_lock();
-
-	process_incoming_messages();
-
-	time_t now = time(NULL);
-
-	process_queued_messages(&now);
-	process_periodic_messages(&now);
-	process_timer_messages(&now);
-
+	{
+		process_queued_messages(&now);
+		process_incoming_messages(&now);
+		process_periodic_messages(&now);
+		process_timer_messages(&now);
+	}
 	ocpp_unlock();
 
 	return 0;
