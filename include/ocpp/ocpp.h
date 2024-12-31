@@ -53,8 +53,32 @@ struct ocpp_message {
 	} payload;
 };
 
+/**
+ * @brief Initializes the OCPP module.
+ *
+ * This function initializes the OCPP (Open Charge Point Protocol) module and
+ * sets up the event callback function that will be called for various OCPP
+ * events.
+ *
+ * @param[in] cb The callback function to handle OCPP events.
+ * @param[in] cb_ctx A user-defined context that will be passed to the callback
+ *            function.
+ *
+ * @return 0 on success, or a negative error code on failure.
+ */
 int ocpp_init(ocpp_event_callback_t cb, void *cb_ctx);
+
+/**
+ * @brief Executes a single step of the OCPP state machine.
+ *
+ * This function performs one iteration of the OCPP (Open Charge Point Protocol)
+ * state machine, processing any pending requests or responses and handling any
+ * necessary state transitions.
+ *
+ * @return 0 on success, or a negative error code on failure.
+ */
 int ocpp_step(void);
+
 /**
  * @bref Function to push a request to the OCPP server.
  *
@@ -73,10 +97,51 @@ int ocpp_step(void);
  */
 int ocpp_push_request(ocpp_message_t type, const void *data, size_t datasize,
 		bool force);
+
+/**
+ * @brief Pushes a deferred OCPP request.
+ *
+ * This function pushes an OCPP (Open Charge Point Protocol) request to be
+ * deferred. The request will be processed after the specified timer expires.
+ *
+ * @param[in] type The type of the OCPP message.
+ * @param[in] data Pointer to the data associated with the request.
+ * @param[in] datasize Size of the data in bytes.
+ * @param[in] timer_sec The timer duration in seconds after which the request
+ *            will be processed.
+ *
+ * @return 0 on success, or a negative error code on failure.
+ */
 int ocpp_push_request_defer(ocpp_message_t type,
 		const void *data, size_t datasize, uint32_t timer_sec);
+
+/**
+ * @brief Pushes an OCPP response.
+ *
+ * This function pushes a response to a previously received OCPP (Open Charge
+ * Point Protocol) request.
+ *
+ * @param[in] req Pointer to the original OCPP request message.
+ * @param[in] data Pointer to the data associated with the response.
+ * @param[in] datasize Size of the data in bytes.
+ * @param[in] err Boolean flag indicating if the response is an error (true) or
+ *            not (false).
+ *
+ * @return 0 on success, or a negative error code on failure.
+ */
 int ocpp_push_response(const struct ocpp_message *req,
 		const void *data, size_t datasize, bool err);
+
+/**
+ * @brief Counts the number of pending OCPP requests.
+ *
+ * This function returns the total number of OCPP (Open Charge Point Protocol)
+ * requests that are currently pending and have not yet been processed.
+ *
+ * @return The number of pending OCPP requests.
+ */
+size_t ocpp_count_pending_requests(void);
+
 /**
  * @brief Save the current OCPP context as a snapshot.
  *
