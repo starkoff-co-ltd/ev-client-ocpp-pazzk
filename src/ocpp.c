@@ -655,6 +655,8 @@ int ocpp_step(void)
 
 int ocpp_init(ocpp_event_callback_t cb, void *cb_ctx)
 {
+	const time_t now = time(NULL);
+
 	memset(&m, 0, sizeof(m));
 
 	list_init(&m.tx.ready);
@@ -663,6 +665,9 @@ int ocpp_init(ocpp_event_callback_t cb, void *cb_ctx)
 
 	m.event_callback = cb;
 	m.event_callback_ctx = cb_ctx;
+
+	update_last_tx_timestamp(&now);
+	update_last_rx_timestamp(&now);
 
 	ocpp_reset_configuration();
 
