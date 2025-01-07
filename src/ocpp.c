@@ -65,7 +65,7 @@ static void add_last_to_list(struct message *msg, struct list *head)
 
 static void add_first_to_list(struct message *msg, struct list *head)
 {
-	list_add_tail(&msg->link, head);
+	list_add(&msg->link, head);
 }
 
 static void del_from_list(struct message *msg, struct list *head)
