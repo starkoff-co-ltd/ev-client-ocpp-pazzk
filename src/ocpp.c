@@ -25,7 +25,7 @@
 #define OCPP_TX_POOL_LEN			8
 #endif
 #if !defined(OCPP_DEFAULT_TX_RETRIES)
-#define OCPP_DEFAULT_TX_RETRIES			1
+#define OCPP_DEFAULT_TX_RETRIES			3
 #endif
 
 #define container_of(ptr, type, member)		\
