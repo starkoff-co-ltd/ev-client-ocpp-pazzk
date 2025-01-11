@@ -17,6 +17,12 @@ extern "C" {
 #define OCPP_MESSAGE_ID_MAXLEN		(36 + 1/*null*/)
 #define OCPP_ID_TOKEN_MAXLEN		(20 + 1/*null*/)
 
+#define OCPP_CiString20			(20 + 1/*null*/)
+#define OCPP_CiString25			(25 + 1/*null*/)
+#define OCPP_CiString50			(50 + 1/*null*/)
+#define OCPP_CiString255		(255 + 1/*null*/)
+#define OCPP_CiString500		(500 + 1/*null*/)
+
 typedef enum {
 	OCPP_MSG_ROLE_NONE		= 0,
 	OCPP_MSG_ROLE_ALLOC		= 1,

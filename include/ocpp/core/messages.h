@@ -15,7 +15,7 @@ extern "C" {
 #include <stdint.h>
 
 struct ocpp_Authorize {
-	char idTag[20+1];
+	char idTag[OCPP_CiString20];
 };
 
 struct ocpp_Authorize_conf {
@@ -23,15 +23,15 @@ struct ocpp_Authorize_conf {
 };
 
 struct ocpp_BootNotification {
-	char chargeBoxSerialNumber[25+1];
-	char chargePointModel[20+1];		/* required */
-	char chargePointSerialNumber[25+1];
-	char chargePointVendor[20+1];		/* required */
-	char firmwareVersion[50+1];
-	char iccid[20+1];
-	char imsi[20+1];
-	char meterSerialNumber[25+1];
-	char meterType[25+1];
+	char chargeBoxSerialNumber[OCPP_CiString25];
+	char chargePointModel[OCPP_CiString20];		/* required */
+	char chargePointSerialNumber[OCPP_CiString25];
+	char chargePointVendor[OCPP_CiString20];	/* required */
+	char firmwareVersion[OCPP_CiString50];
+	char iccid[OCPP_CiString20];
+	char imsi[OCPP_CiString20];
+	char meterSerialNumber[OCPP_CiString25];
+	char meterType[OCPP_CiString25];
 };
 
 struct ocpp_BootNotification_conf {
@@ -50,8 +50,8 @@ struct ocpp_ChangeAvailability_conf {
 };
 
 struct ocpp_ChangeConfiguration {
-	char key[50+1];
-	char value[500+1];
+	char key[OCPP_CiString50];
+	char value[OCPP_CiString500];
 };
 
 struct ocpp_ChangeConfiguration_conf {
@@ -67,8 +67,8 @@ struct ocpp_ClearCache_conf {
 };
 
 struct ocpp_DataTransfer {
-	char vendorId[255+1]; /* required */
-	char messageId[50+1];
+	char vendorId[OCPP_CiString255]; /* required */
+	char messageId[OCPP_CiString50];
 	char padding[13];
 	char data[0];
 };
@@ -84,7 +84,7 @@ struct ocpp_GetConfiguration {
 
 struct ocpp_GetConfiguration_conf {
 	struct ocpp_KeyValue configurationKey;
-	char unknownKey[50+1];
+	char unknownKey[OCPP_CiString50];
 };
 
 struct ocpp_Heartbeat {
@@ -107,7 +107,7 @@ struct ocpp_MeterValues_conf {
 
 struct ocpp_RemoteStartTransaction {
 	int connectorId;
-	char idTag[20+1];
+	char idTag[OCPP_CiString20];
 	struct ocpp_ChargingProfile chargingProfile;
 };
 
@@ -133,7 +133,7 @@ struct ocpp_Reset_conf {
 
 struct ocpp_StartTransaction {
 	int connectorId;
-	char idTag[20+1];
+	char idTag[OCPP_CiString20];
 	uint64_t meterStart;
 	int reservationId;
 	time_t timestamp;
@@ -147,11 +147,11 @@ struct ocpp_StartTransaction_conf {
 struct ocpp_StatusNotification {
 	int connectorId;		/* required */
 	ocpp_error_t errorCode;		/* required */
-	char info[50+1];
+	char info[OCPP_CiString50];
 	ocpp_status_t status;		/* required */
 	time_t timestamp;
-	char vendorId[255+1];
-	char vendorErrorCode[50+1];
+	char vendorId[OCPP_CiString255];
+	char vendorErrorCode[OCPP_CiString50];
 };
 
 struct ocpp_StatusNotification_conf {
