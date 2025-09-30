@@ -161,6 +161,13 @@ static void update_last_rx_timestamp(const time_t *now)
 	OCPP_DEBUG("Last RX timestamp: %ld", m.rx.timestamp);
 }
 
+static uint32_t get_elapsed_since_last_message(const time_t *now)
+{
+	const time_t last = m.tx.timestamp > m.rx.timestamp?
+		m.tx.timestamp : m.rx.timestamp;
+	return (uint32_t)(*now - last);
+}
+
 static void dispatch_event(ocpp_event_t event_type,
 		const struct ocpp_message *msg)
 {
@@ -289,7 +296,7 @@ static bool should_send_heartbeat(const time_t *now)
 	ocpp_get_configuration("HeartbeatInterval",
 			&interval, sizeof(interval), 0);
 	const bool disabled = interval == 0;
-	const uint32_t elapsed = (uint32_t)(*now - m.tx.timestamp);
+	const uint32_t elapsed = get_elapsed_since_last_message(now);
 
 	if (disabled || elapsed < interval || !is_boot_accepted() ||
 			count_messages_ready() > 0 ||
