@@ -143,6 +143,19 @@ int ocpp_push_response(const struct ocpp_message *req,
 size_t ocpp_count_pending_requests(void);
 
 /**
+ * @brief Drops all pending messages of a specific type from all queues.
+ *
+ * This function removes and frees all pending OCPP messages of the specified
+ * type from the ready, wait, and timer queues. Useful for clearing stale
+ * messages (e.g., StatusNotification) after network reconnection.
+ *
+ * @param[in] type The type of OCPP messages to drop.
+ *
+ * @return The number of messages dropped.
+ */
+size_t ocpp_drop_pending_type(ocpp_message_t type);
+
+/**
  * @brief Save the current OCPP context as a snapshot.
  *
  * @param[out] buf buffer for the snapshot to be saved

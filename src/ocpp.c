@@ -694,6 +694,44 @@ size_t ocpp_count_pending_requests(void)
 	return count;
 }
 
+size_t ocpp_drop_pending_type(ocpp_message_t type)
+{
+	size_t count = 0;
+	struct list *p;
+	struct list *t;
+
+	ocpp_lock();
+	{
+		list_for_each_safe(p, t, &m.tx.ready) {
+			struct message *msg = container_of(p, struct message, link);
+			if (msg->body.type == type) {
+				del_msg_ready(msg);
+				free_message(msg);
+				count++;
+			}
+		}
+		list_for_each_safe(p, t, &m.tx.wait) {
+			struct message *msg = container_of(p, struct message, link);
+			if (msg->body.type == type) {
+				del_msg_wait(msg);
+				free_message(msg);
+				count++;
+			}
+		}
+		list_for_each_safe(p, t, &m.tx.timer) {
+			struct message *msg = container_of(p, struct message, link);
+			if (msg->body.type == type) {
+				del_msg_timer(msg);
+				free_message(msg);
+				count++;
+			}
+		}
+	}
+	ocpp_unlock();
+
+	return count;
+}
+
 int ocpp_push_request(ocpp_message_t type, const void *data, size_t datasize,
 		bool force)
 {
