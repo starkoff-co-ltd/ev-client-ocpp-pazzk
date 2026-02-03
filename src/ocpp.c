@@ -694,34 +694,38 @@ size_t ocpp_count_pending_requests(void)
 	return count;
 }
 
+static bool is_in_list(const struct list *node, const struct list *head)
+{
+	struct list *p;
+	list_for_each(p, head) {
+		if (p == node) {
+			return true;
+		}
+	}
+	return false;
+}
+
 size_t ocpp_drop_pending_type(ocpp_message_t type)
 {
 	size_t count = 0;
-	struct list *p;
-	struct list *t;
 
 	ocpp_lock();
 	{
-		list_for_each_safe(p, t, &m.tx.ready) {
-			struct message *msg = container_of(p, struct message, link);
-			if (msg->body.type == type) {
-				del_msg_ready(msg);
-				free_message(msg);
-				count++;
-			}
-		}
-		list_for_each_safe(p, t, &m.tx.wait) {
-			struct message *msg = container_of(p, struct message, link);
-			if (msg->body.type == type) {
-				del_msg_wait(msg);
-				free_message(msg);
-				count++;
-			}
-		}
-		list_for_each_safe(p, t, &m.tx.timer) {
-			struct message *msg = container_of(p, struct message, link);
-			if (msg->body.type == type) {
-				del_msg_timer(msg);
+		/* Iterate through the message pool directly to find and clear
+		 * all messages of the specified type, regardless of which queue
+		 * they're in. This is more robust than iterating through queues. */
+		for (int i = 0; i < OCPP_TX_POOL_LEN; i++) {
+			struct message *msg = &m.tx.pool[i];
+			if (msg->body.role != OCPP_MSG_ROLE_NONE &&
+					msg->body.type == type) {
+				/* Find which queue it's in and remove from that queue */
+				if (is_in_list(&msg->link, &m.tx.ready)) {
+					del_from_list(msg, &m.tx.ready);
+				} else if (is_in_list(&msg->link, &m.tx.wait)) {
+					del_from_list(msg, &m.tx.wait);
+				} else if (is_in_list(&msg->link, &m.tx.timer)) {
+					del_from_list(msg, &m.tx.timer);
+				}
 				free_message(msg);
 				count++;
 			}
